@@ -36,6 +36,17 @@ Four registrations, all scoped to the configured provider:
 State is in memory, per model. Nothing is written to disk unless `debug` is enabled, and the debug log contains only
 model IDs, token numbers and timings — never prompts, bodies or credentials.
 
+## Security
+
+- The plugin never reads `Authorization` and never sends data anywhere. It does not log prompts or bodies.
+- Request bodies are read from a clone only to estimate their size; the bytes are not stored. Bodies larger than 16 MB
+  are measured from `Content-Length` instead of being buffered.
+- The optional debug log is opened with `O_NOFOLLOW` and mode `0600`; a symlinked path is refused. It contains model
+  IDs, token counts and timings only.
+- Reservations are keyed by the request object, so a late or foreign response cannot release someone else's budget. An
+  aborted request releases its own reservation.
+- Every hook body is wrapped: a guard bug is logged (with `debug` on) and never fails a model call.
+
 ## Requirements
 
 - OpenCode 2.3 or newer (`@opencode/plugin` >= 2.3.0).
@@ -66,7 +77,7 @@ Or add it to your global `~/.config/opencode/opencode.json(c)` yourself:
 }
 ```
 
-Pin a release with `github:quqe/opencode-openai-tpm-guard#v0.1.0`. The built `dist/` is committed, so no build step is
+Pin a release with `github:quqe/opencode-openai-tpm-guard#v0.1.1`. The built `dist/` is committed, so no build step is
 needed.
 
 ### From a local checkout
@@ -179,10 +190,14 @@ When everything is healthy you mostly see `pass` and `window`, rare `pausing`, a
 ## Caveats
 
 - The request size is an estimate, not a tokenizer. The safety margin absorbs the error; the retry hook covers misses.
+  Large bodies measured from `Content-Length` overestimate non-ASCII text, which errs on the safe side.
 - OpenCode's retry budget is a hard limit of 10 attempts. The plugin changes delays, not the budget.
 - Pauses happen inside OpenCode's request path, before the request is sent, so they do not compete with
   `headerTimeout`/`chunkTimeout` the way a blocked response would.
 - A pause longer than `maxWaitMs` is abandoned: the request is sent and the ordinary 429 retry path takes over.
+- Gate decisions are serialized per model, so a small title request can wait behind a large prompt for the same model.
+  Requests for other models proceed independently.
+- A reservation whose request never responds and never aborts is released after `reservationTtlMs` (2 minutes).
 
 ## Development
 

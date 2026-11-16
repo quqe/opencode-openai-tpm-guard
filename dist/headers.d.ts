@@ -11,6 +11,11 @@ export declare function parseInteger(raw: string | null | undefined): number | u
  * A bare number is interpreted as seconds, which is how `retry-after` is defined.
  */
 export declare function parseDurationMs(raw: string | null | undefined): number | undefined;
+/**
+ * `retry-after` is either delay-seconds or an HTTP-date; `retry-after-ms` is always
+ * milliseconds and must not be passed through {@link parseDurationMs}.
+ */
+export declare function parseRetryAfter(raw: string | null | undefined, now?: number): number | undefined;
 /** Read the OpenAI token bucket from response headers. */
 export declare function readWindow(headers: Headers): WindowSnapshot;
 /** The 429 body repeats the same headers; use them when no response hook ran. */

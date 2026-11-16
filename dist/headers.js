@@ -26,18 +26,38 @@ export function parseDurationMs(raw) {
     const seconds = Number(raw);
     return Number.isFinite(seconds) ? seconds * 1_000 : undefined;
 }
+/**
+ * `retry-after` is either delay-seconds or an HTTP-date; `retry-after-ms` is always
+ * milliseconds and must not be passed through {@link parseDurationMs}.
+ */
+export function parseRetryAfter(raw, now = Date.now()) {
+    if (!raw)
+        return undefined;
+    const trimmed = raw.trim();
+    if (trimmed.length === 0)
+        return undefined;
+    if (/^\d+(?:\.\d+)?$/.test(trimmed))
+        return Number(trimmed) * 1_000;
+    const date = Date.parse(trimmed);
+    if (Number.isNaN(date))
+        return undefined;
+    return Math.max(0, date - now);
+}
 /** Read the OpenAI token bucket from response headers. */
 export function readWindow(headers) {
     return {
         limit: parseInteger(headers.get("x-ratelimit-limit-tokens")),
         remaining: parseInteger(headers.get("x-ratelimit-remaining-tokens")),
         resetMs: parseDurationMs(headers.get("x-ratelimit-reset-tokens")),
-        retryAfterMs: parseInteger(headers.get("retry-after-ms")) ?? parseDurationMs(headers.get("retry-after")),
+        retryAfterMs: parseInteger(headers.get("retry-after-ms")) ?? parseRetryAfter(headers.get("retry-after")),
     };
 }
 /** The 429 body repeats the same headers; use them when no response hook ran. */
 export function readWindowFromErrorBody(body) {
     if (!body)
+        return {};
+    // Error bodies are small; do not let a hostile endpoint make us parse megabytes.
+    if (body.length > 1_000_000)
         return {};
     try {
         const headers = JSON.parse(body)?.error?.headers;
@@ -45,7 +65,7 @@ export function readWindowFromErrorBody(body) {
             return {};
         return {
             resetMs: parseDurationMs(headers["x-ratelimit-reset-tokens"]),
-            retryAfterMs: parseInteger(headers["retry-after-ms"]) ?? parseDurationMs(headers["retry-after"]),
+            retryAfterMs: parseInteger(headers["retry-after-ms"]) ?? parseRetryAfter(headers["retry-after"]),
         };
     }
     catch {

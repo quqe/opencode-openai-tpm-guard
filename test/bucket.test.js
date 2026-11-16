@@ -31,12 +31,13 @@ test("a request that fits is reserved immediately", async () => {
   bucket.limit = 1_000_000
   bucket.remaining = 1_000_000
   const { timing, sleeps } = fakeTiming()
+  const key = {}
 
-  await reserve(bucket, 200_000, undefined, settings, timing, noop)
+  await reserve(bucket, 200_000, key, undefined, settings, timing, noop)
 
   assert.equal(sleeps.length, 0)
   assert.equal(bucket.reserved, 200_000)
-  assert.equal(bucket.reservations.length, 1)
+  assert.equal(bucket.reservations.size, 1)
 })
 
 test("a request waits for the token window before it is sent", async () => {
@@ -53,7 +54,7 @@ test("a request waits for the token window before it is sent", async () => {
     },
   }
 
-  await reserve(bucket, 200_000, undefined, settings, timing, noop)
+  await reserve(bucket, 200_000, {}, undefined, settings, timing, noop)
 
   assert.ok(fake.sleeps.length > 0, "expected at least one pause")
   assert.equal(bucket.reserved, 200_000)
@@ -66,9 +67,21 @@ test("the pause is bounded by maxWaitMs", async () => {
   bucket.resetAt = 3_600_000
   const { timing, sleeps } = fakeTiming()
 
-  await reserve(bucket, 200_000, undefined, { ...settings, maxWaitMs: 5_000 }, timing, noop)
+  await reserve(bucket, 200_000, {}, undefined, { ...settings, maxWaitMs: 5_000 }, timing, noop)
 
   assert.equal(sleeps.reduce((sum, ms) => sum + ms, 0), 5_000)
+  assert.equal(bucket.reserved, 200_000)
+})
+
+test("a request larger than the whole window is sent immediately", async () => {
+  const bucket = createBucket()
+  bucket.limit = 100_000
+  bucket.remaining = 100_000
+  const { timing, sleeps } = fakeTiming()
+
+  await reserve(bucket, 200_000, {}, undefined, settings, timing, noop)
+
+  assert.equal(sleeps.length, 0)
   assert.equal(bucket.reserved, 200_000)
 })
 
@@ -76,24 +89,53 @@ test("stale reservations are released", async () => {
   const bucket = createBucket()
   bucket.limit = 1_000_000
   bucket.remaining = 1_000_000
+  bucket.reservations.set({}, { tokens: 500_000, at: 0 })
   bucket.reserved = 500_000
-  bucket.reservations.push({ tokens: 500_000, at: 0 })
   const { timing } = fakeTiming(200_000)
 
-  await reserve(bucket, 100_000, undefined, settings, timing, noop)
+  await reserve(bucket, 100_000, {}, undefined, settings, timing, noop)
 
   assert.equal(bucket.reserved, 100_000)
 })
 
-test("release removes the oldest reservation", () => {
+test("release removes only its own reservation and is idempotent", () => {
   const bucket = createBucket()
+  const first = {}
+  const second = {}
+  bucket.reservations.set(first, { tokens: 200_000, at: 0 })
+  bucket.reservations.set(second, { tokens: 100_000, at: 1 })
   bucket.reserved = 300_000
-  bucket.reservations.push({ tokens: 200_000, at: 0 }, { tokens: 100_000, at: 1 })
 
-  release(bucket)
-
+  assert.equal(release(bucket, first), true)
   assert.equal(bucket.reserved, 100_000)
-  assert.equal(bucket.reservations.length, 1)
+  assert.equal(release(bucket, first), false)
+  assert.equal(bucket.reserved, 100_000)
+})
+
+test("an unknown request never releases someone else's reservation", () => {
+  const bucket = createBucket()
+  const held = {}
+  bucket.reservations.set(held, { tokens: 200_000, at: 0 })
+  bucket.reserved = 200_000
+
+  assert.equal(release(bucket, {}), false)
+  assert.equal(bucket.reserved, 200_000)
+})
+
+test("an aborted request releases its reservation", async () => {
+  const bucket = createBucket()
+  bucket.limit = 1_000_000
+  bucket.remaining = 1_000_000
+  const { timing } = fakeTiming()
+  const controller = new AbortController()
+  const key = {}
+
+  await reserve(bucket, 100_000, key, controller.signal, settings, timing, noop)
+  assert.equal(bucket.reserved, 100_000)
+
+  controller.abort()
+  assert.equal(bucket.reserved, 0)
+  assert.equal(release(bucket, key), false)
 })
 
 test("a 429 closes the window until the token reset", () => {

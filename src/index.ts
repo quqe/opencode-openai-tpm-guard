@@ -9,7 +9,13 @@ export const PLUGIN_ID = "openai-tpm-guard"
 
 export { createBucket, observe, release, reserve } from "./bucket.js"
 export { estimateRequestTokens } from "./estimate.js"
-export { parseDurationMs, parseInteger, readWindow, readWindowFromErrorBody } from "./headers.js"
+export {
+  parseDurationMs,
+  parseInteger,
+  parseRetryAfter,
+  readWindow,
+  readWindowFromErrorBody,
+} from "./headers.js"
 export { DEFAULT_OPTIONS, readOptions, type GuardOptions } from "./options.js"
 
 interface Shared {
@@ -19,7 +25,7 @@ interface Shared {
   retries: WeakSet<object>
 }
 
-const SHARED_KEY = Symbol.for("opencode.openai-tpm-guard.shared")
+const SHARED_KEY = Symbol.for("opencode.openai-tpm-guard.shared.v2")
 
 /**
  * OpenCode can load one plugin file once per location in the same server process.
@@ -65,7 +71,8 @@ export default Plugin.define({
     const bucketFor = (modelID: string) => {
       const key = `${options.providerID}:${modelID}`
       let bucket = shared.buckets.get(key)
-      if (!bucket) {
+      // A reload can leave state from an older plugin version; replace anything unexpected.
+      if (!bucket || !(bucket.reservations instanceof Map)) {
         bucket = createBucket()
         shared.buckets.set(key, bucket)
       }
@@ -77,28 +84,31 @@ export default Plugin.define({
     const responseHook = await ctx.session.hook(
       "http.response",
       (event) => {
-        if (shared.responses.has(event.response)) return
-        shared.responses.add(event.response)
+        if (shared.responses.has(event)) return
+        shared.responses.add(event)
+        try {
+          const bucket = bucketFor(event.model.id)
+          release(bucket, event.request)
+          observe(
+            bucket,
+            readWindow(event.response.headers),
+            event.response.status,
+            timing.now(),
+            options.minRetryDelayMs,
+          )
 
-        const bucket = bucketFor(event.model.id)
-        release(bucket)
-        observe(
-          bucket,
-          readWindow(event.response.headers),
-          event.response.status,
-          timing.now(),
-          options.minRetryDelayMs,
-        )
-
-        if (event.response.status === 429) {
-          log("429", { model: event.model.id, resetAt: bucket.resetAt - timing.now() })
-        } else if (bucket.limit > 0) {
-          log("window", {
-            model: event.model.id,
-            limit: bucket.limit,
-            remaining: bucket.remaining,
-            resetMs: Math.max(0, bucket.resetAt - timing.now()),
-          })
+          if (event.response.status === 429) {
+            log("429", { model: event.model.id, resetAt: bucket.resetAt - timing.now() })
+          } else if (bucket.limit > 0) {
+            log("window", {
+              model: event.model.id,
+              limit: bucket.limit,
+              remaining: bucket.remaining,
+              resetMs: Math.max(0, bucket.resetAt - timing.now()),
+            })
+          }
+        } catch (error) {
+          log("guard error", { hook: "http.response", message: String(error) })
         }
       },
       { providerID: options.providerID },
@@ -107,17 +117,17 @@ export default Plugin.define({
     const requestHook = await ctx.session.hook(
       "http.request",
       async (event) => {
-        if (shared.requests.has(event.request)) return
-        shared.requests.add(event.request)
+        if (shared.requests.has(event)) return
+        shared.requests.add(event)
 
-        const bucket = bucketFor(event.model.id)
-        const tokens = await estimateRequestTokens(event.request, options.tokensPerChar)
         try {
-          await reserve(bucket, tokens, event.request.signal, options, timing, log)
+          const bucket = bucketFor(event.model.id)
+          const tokens = await estimateRequestTokens(event.request, options.tokensPerChar)
+          await reserve(bucket, tokens, event.request, event.request.signal, options, timing, log)
         } catch (error) {
           if (event.request.signal.aborted) throw error
           // Never block a real request because the guard itself failed.
-          log("guard error", { message: String(error) })
+          log("guard error", { hook: "http.request", message: String(error) })
         }
       },
       { providerID: options.providerID },
@@ -128,30 +138,33 @@ export default Plugin.define({
       (event) => {
         if (shared.retries.has(event)) return
         shared.retries.add(event)
+        try {
+          const error = event.error
+          if (error.type !== "provider.rate-limit" && error.status !== 429) return
 
-        const error = event.error
-        if (error.type !== "provider.rate-limit" && error.status !== 429) return
+          const bucket = bucketFor(event.model.id)
+          const body = readWindowFromErrorBody(error.response?.body)
+          const now = timing.now()
+          const observed = Math.max(0, bucket.resetAt - now)
+          const delay = Math.min(
+            options.maxRetryDelayMs,
+            Math.max(
+              options.minRetryDelayMs,
+              observed,
+              body.resetMs ?? 0,
+              body.retryAfterMs ?? 0,
+              error.retryAfterMs ?? 0,
+            ),
+          )
+          const jittered = Math.round(delay * (1 + Math.random() * 0.15))
 
-        const bucket = bucketFor(event.model.id)
-        const body = readWindowFromErrorBody(error.response?.body)
-        const now = timing.now()
-        const observed = Math.max(0, bucket.resetAt - now)
-        const delay = Math.min(
-          options.maxRetryDelayMs,
-          Math.max(
-            options.minRetryDelayMs,
-            observed,
-            body.resetMs ?? 0,
-            body.retryAfterMs ?? 0,
-            error.retryAfterMs ?? 0,
-          ),
-        )
-        const jittered = Math.round(delay * (1 + Math.random() * 0.15))
-
-        bucket.remaining = 0
-        bucket.resetAt = now + jittered
-        event.decision = { retry: true, delay: jittered }
-        log("retry", { model: event.model.id, attempt: event.attempt, delayMs: jittered })
+          bucket.remaining = 0
+          bucket.resetAt = now + jittered
+          event.decision = { retry: true, delay: jittered }
+          log("retry", { model: event.model.id, attempt: event.attempt, delayMs: jittered })
+        } catch (error) {
+          log("guard error", { hook: "retry", message: String(error) })
+        }
       },
       { providerID: options.providerID },
     )
