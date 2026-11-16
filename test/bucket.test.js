@@ -158,3 +158,58 @@ test("normal responses update the bucket", () => {
   assert.equal(bucket.remaining, 999_000)
   assert.equal(bucket.resetAt, 31_000)
 })
+
+test("a non-finite estimate cannot poison the budget", async () => {
+  const bucket = createBucket()
+  bucket.limit = 1_000_000
+  bucket.remaining = 1_000_000
+  const { timing } = fakeTiming()
+  const key = {}
+
+  await reserve(bucket, Number.POSITIVE_INFINITY, key, undefined, settings, timing, noop)
+
+  assert.equal(bucket.reserved, 40_000)
+  release(bucket, key)
+  assert.equal(bucket.reserved, 0)
+})
+
+test("two reservations for one request are counted once", async () => {
+  const bucket = createBucket()
+  bucket.limit = 1_000_000
+  bucket.remaining = 1_000_000
+  const { timing } = fakeTiming()
+  const key = {}
+
+  await Promise.all([
+    reserve(bucket, 200_000, key, undefined, settings, timing, noop),
+    reserve(bucket, 200_000, key, undefined, settings, timing, noop),
+  ])
+
+  assert.equal(bucket.reserved, 200_000)
+  assert.equal(bucket.reservations.size, 1)
+})
+
+test("an already-aborted request is rejected before it reserves", async () => {
+  const bucket = createBucket()
+  bucket.limit = 1_000_000
+  bucket.remaining = 1_000_000
+  const { timing } = fakeTiming()
+  const controller = new AbortController()
+  controller.abort()
+
+  await assert.rejects(
+    reserve(bucket, 100_000, {}, controller.signal, settings, timing, noop),
+    /aborted|AbortError/i,
+  )
+  assert.equal(bucket.reserved, 0)
+})
+
+test("nonsense headers are ignored or clamped", () => {
+  const bucket = createBucket()
+
+  observe(bucket, { limit: -1, remaining: -5, resetMs: 1e12 }, 200, 1_000, 2_000)
+
+  assert.equal(bucket.limit, 0)
+  assert.equal(bucket.remaining, Number.POSITIVE_INFINITY)
+  assert.equal(bucket.resetAt, 1_000 + 3_600_000)
+})

@@ -28,7 +28,7 @@ export interface ReserveSettings {
 export declare function createBucket(): Bucket;
 /** Release the reservation made for `key`, if it is still held. Idempotent. */
 export declare function release(bucket: Bucket, key: object): boolean;
-/** Apply a response's headers to the bucket. */
+/** Apply a response's headers to the bucket, ignoring nonsense values. */
 export declare function observe(bucket: Bucket, snapshot: WindowSnapshot, status: number | undefined, now: number, minRetryDelayMs: number): void;
 /**
  * Claim `tokens` from the window, waiting until the reset brings enough room back.

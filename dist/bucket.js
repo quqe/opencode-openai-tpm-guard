@@ -1,3 +1,8 @@
+/** A TPM window is at most a minute; anything longer is a malformed header. */
+const MAX_WINDOW_MS = 3_600_000;
+/** No single request reserves more than this; larger estimates are clamped. */
+const MAX_RESERVATION_TOKENS = 2_000_000;
+const FALLBACK_TOKENS = 40_000;
 export function createBucket() {
     return {
         limit: 0,
@@ -8,13 +13,20 @@ export function createBucket() {
         gate: Promise.resolve(),
     };
 }
+function normalizeTokens(tokens) {
+    if (!Number.isFinite(tokens) || tokens <= 0)
+        return FALLBACK_TOKENS;
+    return Math.min(Math.trunc(tokens), MAX_RESERVATION_TOKENS);
+}
 /** Release the reservation made for `key`, if it is still held. Idempotent. */
 export function release(bucket, key) {
     const reservation = bucket.reservations.get(key);
     if (!reservation)
         return false;
     bucket.reservations.delete(key);
-    bucket.reserved = Math.max(0, bucket.reserved - reservation.tokens);
+    bucket.reserved = Math.max(0, bucket.reserved - Math.max(0, reservation.tokens));
+    if (!Number.isFinite(bucket.reserved))
+        bucket.reserved = 0;
     if (reservation.signal && reservation.onAbort) {
         reservation.signal.removeEventListener("abort", reservation.onAbort);
     }
@@ -25,6 +37,8 @@ function claim(bucket, key, tokens, now, signal) {
         return;
     if (bucket.reservations.has(key))
         return;
+    if (!Number.isFinite(bucket.reserved))
+        bucket.reserved = 0;
     const reservation = { tokens, at: now, signal };
     if (signal) {
         reservation.onAbort = () => release(bucket, key);
@@ -35,23 +49,38 @@ function claim(bucket, key, tokens, now, signal) {
 }
 function prune(bucket, now, ttl) {
     for (const [key, reservation] of bucket.reservations) {
-        if (now - reservation.at > ttl)
+        if (!Number.isFinite(reservation.at) || now - reservation.at > ttl)
             release(bucket, key);
     }
 }
-/** Apply a response's headers to the bucket. */
-export function observe(bucket, snapshot, status, now, minRetryDelayMs) {
-    if (snapshot.limit !== undefined)
-        bucket.limit = snapshot.limit;
-    if (snapshot.remaining !== undefined)
-        bucket.remaining = snapshot.remaining;
-    if (snapshot.resetMs !== undefined)
-        bucket.resetAt = now + snapshot.resetMs;
-    if (status === 429) {
-        bucket.remaining = 0;
-        bucket.resetAt =
-            now + Math.max(snapshot.resetMs ?? 0, snapshot.retryAfterMs ?? 0, minRetryDelayMs);
+function repair(bucket) {
+    if (!Number.isFinite(bucket.reserved) || bucket.reserved < 0)
+        bucket.reserved = 0;
+    if (!Number.isFinite(bucket.limit) || bucket.limit < 0)
+        bucket.limit = 0;
+    if (!Number.isFinite(bucket.resetAt) || bucket.resetAt < 0)
+        bucket.resetAt = 0;
+    if (bucket.remaining !== Number.POSITIVE_INFINITY && !Number.isFinite(bucket.remaining)) {
+        bucket.remaining = Number.POSITIVE_INFINITY;
     }
+}
+/** Apply a response's headers to the bucket, ignoring nonsense values. */
+export function observe(bucket, snapshot, status, now, minRetryDelayMs) {
+    if (snapshot.limit !== undefined && Number.isFinite(snapshot.limit) && snapshot.limit > 0) {
+        bucket.limit = Math.trunc(snapshot.limit);
+    }
+    if (snapshot.remaining !== undefined && Number.isFinite(snapshot.remaining) && snapshot.remaining >= 0) {
+        bucket.remaining = Math.trunc(snapshot.remaining);
+    }
+    if (snapshot.resetMs !== undefined && Number.isFinite(snapshot.resetMs) && snapshot.resetMs >= 0) {
+        bucket.resetAt = now + Math.min(snapshot.resetMs, MAX_WINDOW_MS);
+    }
+    if (status === 429) {
+        const delay = Math.max(snapshot.resetMs ?? 0, snapshot.retryAfterMs ?? 0, minRetryDelayMs);
+        bucket.remaining = 0;
+        bucket.resetAt = now + Math.min(Number.isFinite(delay) ? delay : minRetryDelayMs, MAX_WINDOW_MS);
+    }
+    repair(bucket);
 }
 /**
  * Claim `tokens` from the window, waiting until the reset brings enough room back.
@@ -62,30 +91,38 @@ export function observe(bucket, snapshot, status, now, minRetryDelayMs) {
 export function reserve(bucket, tokens, key, signal, settings, timing, log) {
     if (bucket.reservations.has(key))
         return Promise.resolve();
+    const amount = normalizeTokens(tokens);
+    // The deadline starts when the request asks for a slot, not after it reaches the front
+    // of the queue; otherwise a burst of N requests multiplies maxWaitMs by N.
+    const deadline = timing.now() + settings.maxWaitMs;
     const run = bucket.gate.then(async () => {
-        const deadline = timing.now() + settings.maxWaitMs;
         while (true) {
+            if (signal?.aborted)
+                throw signal.reason ?? new Error("aborted");
             prune(bucket, timing.now(), settings.reservationTtlMs);
+            repair(bucket);
             const now = timing.now();
             if (bucket.resetAt > 0 && now >= bucket.resetAt) {
                 bucket.remaining = bucket.limit > 0 ? bucket.limit : Number.POSITIVE_INFINITY;
                 bucket.resetAt = 0;
             }
             const available = bucket.remaining - bucket.reserved;
-            const impossible = bucket.limit > 0 && tokens + settings.safetyMarginTokens > bucket.limit;
+            const impossible = bucket.limit > 0 && amount + settings.safetyMarginTokens > bucket.limit;
             const fits = bucket.remaining === Number.POSITIVE_INFINITY ||
-                available >= tokens + settings.safetyMarginTokens;
+                available >= amount + settings.safetyMarginTokens;
             if (fits || impossible) {
+                if (signal?.aborted)
+                    throw signal.reason ?? new Error("aborted");
                 if (impossible) {
                     log("request exceeds the window, sending anyway", {
-                        need: tokens,
+                        need: amount,
                         limit: bucket.limit,
                     });
                 }
-                claim(bucket, key, tokens, now, signal);
+                claim(bucket, key, amount, now, signal);
                 if (!impossible) {
                     log("pass", {
-                        need: tokens,
+                        need: amount,
                         available: Number.isFinite(available) ? available : "unbounded",
                         reserved: bucket.reserved,
                         limit: bucket.limit,
@@ -94,8 +131,8 @@ export function reserve(bucket, tokens, key, signal, settings, timing, log) {
                 return;
             }
             if (now >= deadline) {
-                log("pause limit reached, sending anyway", { available, need: tokens });
-                claim(bucket, key, tokens, now, signal);
+                log("pause limit reached, sending anyway", { available, need: amount });
+                claim(bucket, key, amount, now, signal);
                 return;
             }
             const untilReset = bucket.resetAt > now ? bucket.resetAt - now + 250 : 5_000;
@@ -104,7 +141,7 @@ export function reserve(bucket, tokens, key, signal, settings, timing, log) {
                 waitMs: Math.round(wait),
                 available,
                 reserved: bucket.reserved,
-                need: tokens,
+                need: amount,
                 limit: bucket.limit,
             });
             await timing.sleep(wait, signal);

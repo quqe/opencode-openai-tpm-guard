@@ -51,11 +51,18 @@ export default Plugin.define({
         const timing = { now: () => Date.now(), sleep };
         const bucketFor = (modelID) => {
             const key = `${options.providerID}:${modelID}`;
-            let bucket = shared.buckets.get(key);
-            // A reload can leave state from an older plugin version; replace anything unexpected.
-            if (!bucket || !(bucket.reservations instanceof Map)) {
-                bucket = createBucket();
-                shared.buckets.set(key, bucket);
+            const bucket = shared.buckets.get(key);
+            const valid = bucket !== undefined &&
+                bucket.reservations instanceof Map &&
+                Number.isFinite(bucket.reserved) &&
+                Number.isFinite(bucket.limit) &&
+                Number.isFinite(bucket.resetAt) &&
+                (bucket.remaining === Number.POSITIVE_INFINITY || Number.isFinite(bucket.remaining));
+            if (!valid) {
+                // A reload or a malformed value must not leave a poisoned bucket behind.
+                const fresh = createBucket();
+                shared.buckets.set(key, fresh);
+                return fresh;
             }
             return bucket;
         };
@@ -113,11 +120,17 @@ export default Plugin.define({
                 const now = timing.now();
                 const observed = Math.max(0, bucket.resetAt - now);
                 const delay = Math.min(options.maxRetryDelayMs, Math.max(options.minRetryDelayMs, observed, body.resetMs ?? 0, body.retryAfterMs ?? 0, error.retryAfterMs ?? 0));
-                const jittered = Math.round(delay * (1 + Math.random() * 0.15));
+                const jittered = Math.min(options.maxRetryDelayMs, Math.round(delay * (1 + Math.random() * 0.15)));
                 bucket.remaining = 0;
                 bucket.resetAt = now + jittered;
-                event.decision = { retry: true, delay: jittered };
-                log("retry", { model: event.model.id, attempt: event.attempt, delayMs: jittered });
+                // Extend the host's delay, never override a terminal decision.
+                if (event.decision.retry === true) {
+                    event.decision = { retry: true, delay: jittered };
+                    log("retry", { model: event.model.id, attempt: event.attempt, delayMs: jittered });
+                }
+                else {
+                    log("retry exhausted", { model: event.model.id, attempt: event.attempt });
+                }
             }
             catch (error) {
                 log("guard error", { hook: "retry", message: String(error) });

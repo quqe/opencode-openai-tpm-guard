@@ -41,8 +41,9 @@ model IDs, token numbers and timings — never prompts, bodies or credentials.
 - The plugin never reads `Authorization` and never sends data anywhere. It does not log prompts or bodies.
 - Request bodies are read from a clone only to estimate their size; the bytes are not stored. Bodies larger than 16 MB
   are measured from `Content-Length` instead of being buffered.
-- The optional debug log is opened with `O_NOFOLLOW` and mode `0600`; a symlinked path is refused. It contains model
-  IDs, token counts and timings only.
+- The debug log lives in a fixed private directory (`$XDG_STATE_HOME/opencode/openai-tpm-guard`), is opened with
+  `O_NOFOLLOW | O_NONBLOCK`, must be a regular file owned by the current uid, is kept at mode `0600`, and is truncated
+  at 5 MB. Fields are stripped of control characters and bounded. Project configuration cannot choose the path.
 - Reservations are keyed by the request object, so a late or foreign response cannot release someone else's budget. An
   aborted request releases its own reservation.
 - Every hook body is wrapped: a guard bug is logged (with `debug` on) and never fails a model call.
@@ -77,7 +78,7 @@ Or add it to your global `~/.config/opencode/opencode.json(c)` yourself:
 }
 ```
 
-Pin a release with `github:quqe/opencode-openai-tpm-guard#v0.1.1`. The built `dist/` is committed, so no build step is
+Pin a release with `github:quqe/opencode-openai-tpm-guard#v0.1.2`. The built `dist/` is committed, so no build step is
 needed.
 
 ### From a local checkout
@@ -168,14 +169,16 @@ Pass them on the plugin entry in `opencode.json(c)`.
 | `minRetryDelayMs` | `2000` | Never retry a rate limit faster than this. |
 | `maxRetryDelayMs` | `120000` | Longest retry delay asked from OpenCode. |
 | `reservationTtlMs` | `120000` | Release a reservation this old (aborted request). |
-| `debug` | `false` | Write pacing and 429 diagnostics. |
-| `logFile` | `"/tmp/opencode/openai-tpm-guard.log"` | Debug destination; `null` writes to stderr. |
+| `debug` | `false` | Write pacing and 429 diagnostics to the private state log. |
 
-Invalid values fall back to defaults or are clamped, so a typo cannot produce `NaN` delays.
+Invalid values fall back to defaults or are clamped, so a typo cannot produce `NaN` delays. `maxWaitMs`,
+`maxRetryDelayMs` and `reservationTtlMs` are capped at ten minutes, and token margins at two million.
 
 ## Logs
 
-With `debug: true`:
+With `debug: true`, records go to `$XDG_STATE_HOME/opencode/openai-tpm-guard/debug.log` (default
+`~/.local/state/opencode/openai-tpm-guard/debug.log`). The file is private to the current user, created with mode `0600`,
+written without following symlinks, and truncated when it grows past 5 MB.
 
 ```text
 pass    {"need":11023,"available":2000000,"reserved":11023,"limit":2000000}
@@ -190,7 +193,9 @@ When everything is healthy you mostly see `pass` and `window`, rare `pausing`, a
 ## Caveats
 
 - The request size is an estimate, not a tokenizer. The safety margin absorbs the error; the retry hook covers misses.
-  Large bodies measured from `Content-Length` overestimate non-ASCII text, which errs on the safe side.
+  Bodies below 16 MB are cloned to measure their size; a chunked body without `Content-Length` is still cloned. Large
+  bodies measured from `Content-Length` overestimate non-ASCII text, which errs on the safe side.
+- Declared output budgets are clamped to two million tokens; a malformed number cannot poison the window.
 - OpenCode's retry budget is a hard limit of 10 attempts. The plugin changes delays, not the budget.
 - Pauses happen inside OpenCode's request path, before the request is sent, so they do not compete with
   `headerTimeout`/`chunkTimeout` the way a blocked response would.

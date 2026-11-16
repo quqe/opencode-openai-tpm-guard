@@ -1,4 +1,6 @@
-export const DEFAULT_LOG_FILE = "/tmp/opencode/openai-tpm-guard.log";
+/** Ten minutes: long enough for a TPM window, short enough not to look stuck. */
+const MAX_PAUSE_MS = 600_000;
+const MAX_OUTPUT_MARGIN = 2_000_000;
 export const DEFAULT_OPTIONS = {
     enabled: true,
     providerID: "openai",
@@ -9,7 +11,6 @@ export const DEFAULT_OPTIONS = {
     maxRetryDelayMs: 120_000,
     reservationTtlMs: 120_000,
     debug: false,
-    logFile: DEFAULT_LOG_FILE,
 };
 function asBoolean(value, fallback) {
     return typeof value === "boolean" ? value : fallback;
@@ -29,14 +30,11 @@ export function readOptions(raw) {
         enabled: asBoolean(source.enabled, DEFAULT_OPTIONS.enabled),
         providerID: asString(source.providerID, DEFAULT_OPTIONS.providerID),
         tokensPerChar: asNumber(source.tokensPerChar, DEFAULT_OPTIONS.tokensPerChar, 0.05, 1),
-        safetyMarginTokens: Math.floor(asNumber(source.safetyMarginTokens, DEFAULT_OPTIONS.safetyMarginTokens, 0, 10_000_000)),
-        maxWaitMs: Math.floor(asNumber(source.maxWaitMs, DEFAULT_OPTIONS.maxWaitMs, 1_000, 3_600_000)),
-        minRetryDelayMs: Math.floor(asNumber(source.minRetryDelayMs, DEFAULT_OPTIONS.minRetryDelayMs, 0, 600_000)),
-        maxRetryDelayMs: Math.floor(asNumber(source.maxRetryDelayMs, DEFAULT_OPTIONS.maxRetryDelayMs, 1_000, 3_600_000)),
-        reservationTtlMs: Math.floor(asNumber(source.reservationTtlMs, DEFAULT_OPTIONS.reservationTtlMs, 1_000, 3_600_000)),
+        safetyMarginTokens: Math.floor(asNumber(source.safetyMarginTokens, DEFAULT_OPTIONS.safetyMarginTokens, 0, MAX_OUTPUT_MARGIN)),
+        maxWaitMs: Math.floor(asNumber(source.maxWaitMs, DEFAULT_OPTIONS.maxWaitMs, 1_000, MAX_PAUSE_MS)),
+        minRetryDelayMs: Math.floor(asNumber(source.minRetryDelayMs, DEFAULT_OPTIONS.minRetryDelayMs, 0, MAX_PAUSE_MS)),
+        maxRetryDelayMs: Math.floor(asNumber(source.maxRetryDelayMs, DEFAULT_OPTIONS.maxRetryDelayMs, 1_000, MAX_PAUSE_MS)),
+        reservationTtlMs: Math.floor(asNumber(source.reservationTtlMs, DEFAULT_OPTIONS.reservationTtlMs, 1_000, MAX_PAUSE_MS)),
         debug: asBoolean(source.debug, DEFAULT_OPTIONS.debug),
-        logFile: source.logFile === null
-            ? null
-            : asString(source.logFile, DEFAULT_OPTIONS.logFile ?? "/tmp/opencode/openai-tpm-guard.log"),
     };
 }

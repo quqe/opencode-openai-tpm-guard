@@ -15,12 +15,9 @@ export interface GuardOptions {
     maxRetryDelayMs: number;
     /** A reservation older than this is assumed lost (aborted request) and released. */
     reservationTtlMs: number;
-    /** Write pacing and 429 diagnostics. */
+    /** Write pacing and 429 diagnostics to the private state log. */
     debug: boolean;
-    /** Debug log destination; null writes to stderr. */
-    logFile: string | null;
 }
-export declare const DEFAULT_LOG_FILE = "/tmp/opencode/openai-tpm-guard.log";
 export declare const DEFAULT_OPTIONS: GuardOptions;
 /** Validate plugin options; a typo degrades to a sane default instead of NaN delays. */
 export declare function readOptions(raw: Readonly<Record<string, unknown>> | undefined): GuardOptions;
