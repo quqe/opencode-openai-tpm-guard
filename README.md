@@ -44,29 +44,62 @@ model IDs, token numbers and timings — never prompts, bodies or credentials.
 
 ## Install
 
-The plugin is a package with a built `dist/`. Build it once:
+### From GitHub
+
+OpenCode installs GitHub packages directly:
 
 ```sh
-npm install
-npm run build
+opencode plugin add github:quqe/opencode-openai-tpm-guard
 ```
 
-Then load the directory from your global `~/.config/opencode/opencode.json(c)`:
+Or add it to your global `~/.config/opencode/opencode.json(c)` yourself:
 
 ```jsonc
 {
   "$schema": "https://opencode.ai/config.json",
   "plugins": [
     {
-      "package": "/code/opencode-openai-tpm-guard",
+      "package": "github:quqe/opencode-openai-tpm-guard",
       "options": { "debug": true }
     }
   ]
 }
 ```
 
-An absolute path works; a relative path resolves from the config file that contains it. OpenCode reloads config and
-local plugins automatically.
+Pin a release with `github:quqe/opencode-openai-tpm-guard#v0.1.0`. The built `dist/` is committed, so no build step is
+needed.
+
+### From a local checkout
+
+```sh
+git clone https://github.com/quqe/opencode-openai-tpm-guard.git
+cd opencode-openai-tpm-guard
+npm install   # installs dev dependencies and builds dist/ through prepare
+```
+
+Then point the config at the checkout. An absolute path works; a relative path resolves from the config file that
+contains it:
+
+```jsonc
+"plugins": [
+  {
+    "package": "/path/to/opencode-openai-tpm-guard",
+    "options": { "debug": true }
+  }
+]
+```
+
+OpenCode reloads configuration and local plugins automatically.
+
+### Verify
+
+```sh
+opencode plugin list
+```
+
+The plugin appears as `openai-tpm-guard`. Do not also copy the entry file into `~/.config/opencode/plugins/`: that
+directory is auto-discovered, so the plugin would load twice. Duplicate instances are harmless (the guard deduplicates
+events), but the extra copy is redundant.
 
 ## Transport
 
