@@ -117,8 +117,8 @@ export default Plugin.define({
               resetMs: Math.max(0, bucket.resetAt - timing.now()),
             })
           }
-        } catch (error) {
-          log("guard error", { hook: "http.response", message: String(error) })
+        } catch {
+          log("guard error", { hook: "http.response" })
         }
       },
       { providerID: options.providerID },
@@ -137,7 +137,7 @@ export default Plugin.define({
         } catch (error) {
           if (event.request.signal.aborted) throw error
           // Never block a real request because the guard itself failed.
-          log("guard error", { hook: "http.request", message: String(error) })
+          log("guard error", { hook: "http.request" })
         }
       },
       { providerID: options.providerID },
@@ -163,7 +163,9 @@ export default Plugin.define({
               observed,
               body.resetMs ?? 0,
               body.retryAfterMs ?? 0,
-              error.retryAfterMs ?? 0,
+              typeof error.retryAfterMs === "number" && Number.isFinite(error.retryAfterMs)
+                ? error.retryAfterMs
+                : 0,
             ),
           )
           const jittered = Math.min(
@@ -175,13 +177,15 @@ export default Plugin.define({
           bucket.resetAt = now + jittered
           // Extend the host's delay, never override a terminal decision.
           if (event.decision.retry === true) {
-            event.decision = { retry: true, delay: jittered }
-            log("retry", { model: event.model.id, attempt: event.attempt, delayMs: jittered })
+            const hostDelay = Number.isFinite(event.decision.delay) ? event.decision.delay : 0
+            const finalDelay = Math.max(hostDelay, jittered)
+            event.decision = { retry: true, delay: finalDelay }
+            log("retry", { model: event.model.id, attempt: event.attempt, delayMs: finalDelay })
           } else {
             log("retry exhausted", { model: event.model.id, attempt: event.attempt })
           }
-        } catch (error) {
-          log("guard error", { hook: "retry", message: String(error) })
+        } catch {
+          log("guard error", { hook: "retry" })
         }
       },
       { providerID: options.providerID },

@@ -28,8 +28,8 @@ Four registrations, all scoped to the configured provider:
 1. **`http.response`** — parses `x-ratelimit-limit-tokens`, `-remaining-tokens` and `-reset-tokens`.
 2. **`http.request`** — estimates the request size (serialized body length + reserved output) and waits until the window
    has room. Pauses are chunked and cancellable; the session is never interrupted.
-3. **`retry`** — on `429` sets the retry delay from the token reset (falling back to `retry-after`), capped at
-   `maxRetryDelayMs`.
+3. **`retry`** — on `429` extends the host's retry delay using the token reset (falling back to `retry-after`). The
+   guard's contribution is capped at `maxRetryDelayMs`; an existing longer host delay is preserved.
 4. **Concurrency** — reservations are shared per model, so subagents, title generation and compaction all count against
    the same budget.
 
@@ -39,11 +39,13 @@ model IDs, token numbers and timings — never prompts, bodies or credentials.
 ## Security
 
 - The plugin never reads `Authorization` and never sends data anywhere. It does not log prompts or bodies.
-- Request bodies are read from a clone only to estimate their size; the bytes are not stored. Bodies larger than 16 MB
-  are measured from `Content-Length`; without it, at most 4 MB is read and the clone is cancelled.
+- Request bodies are read from a clone only to estimate their size; the bytes are not persisted. Bodies larger than 16 MB
+  are measured from `Content-Length`; otherwise, at most 4 MB is read. A stalled read is cancelled after one second and
+  uses a fallback estimate.
 - The debug log lives in a fixed private directory (`$XDG_STATE_HOME/opencode/openai-tpm-guard`), is opened with
-  `O_NOFOLLOW | O_NONBLOCK`, must be a regular file owned by the current uid, is kept at mode `0600`, and is truncated
-  at 5 MB. Fields are stripped of control characters and bounded. Project configuration cannot choose the path.
+  `O_NOFOLLOW | O_NONBLOCK` where available, must be a singly linked regular file owned by the current uid, is kept at
+  mode `0600`, and is truncated at 5 MB. The final directory must be private and owned by the current uid; unsafe paths
+  disable logging. Fields are stripped of control characters and bounded; exception text is not logged.
 - Reservations are keyed by the request object, so a late or foreign response cannot release someone else's budget. An
   aborted request releases its own reservation.
 - Every hook body is wrapped: a guard bug is logged (with `debug` on) and never fails a model call.
@@ -167,7 +169,7 @@ Pass them on the plugin entry in `opencode.json(c)`.
 | `safetyMarginTokens` | `30000` | Headroom kept free so an estimate miss does not become a 429. |
 | `maxWaitMs` | `300000` | Longest single pause before a request is sent anyway. |
 | `minRetryDelayMs` | `2000` | Never retry a rate limit faster than this. |
-| `maxRetryDelayMs` | `120000` | Longest retry delay asked from OpenCode. |
+| `maxRetryDelayMs` | `120000` | Cap on the guard's retry delay; longer host delays are preserved. |
 | `reservationTtlMs` | `120000` | Release a reservation this old (aborted request). |
 | `debug` | `false` | Write pacing and 429 diagnostics to the private state log. |
 
@@ -195,6 +197,7 @@ When everything is healthy you mostly see `pass` and `window`, rare `pausing`, a
 - The request size is an estimate, not a tokenizer. The safety margin absorbs the error; the retry hook covers misses.
   A body without `Content-Length` is read up to 4 MB, so a larger chunked body is measured from its prefix. Large bodies
   measured from `Content-Length` overestimate non-ASCII text, which errs on the safe side.
+- A body that cannot be read within one second uses a 40,000-token fallback; this can underestimate large slow streams.
 - Declared output budgets are clamped to two million tokens; a malformed number cannot poison the window.
 - OpenCode's retry budget is a hard limit of 10 attempts. The plugin changes delays, not the budget.
 - Pauses happen inside OpenCode's request path, before the request is sent, so they do not compete with

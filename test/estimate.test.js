@@ -4,6 +4,7 @@ import {
   estimateRequestTokens,
   LARGE_BODY_BYTES,
   LARGE_BODY_OUTPUT_TOKENS,
+  MAX_BODY_READ_MS,
   MAX_BODY_READ_BYTES,
   MAX_OUTPUT_TOKENS,
   outputTokens,
@@ -17,6 +18,36 @@ test("outputTokens reads and clamps every OpenAI output field", () => {
   assert.equal(outputTokens('{"max_tokens":"999"}'), 0)
   assert.equal(outputTokens('{"max_tokens":-5}'), 0)
   assert.equal(outputTokens('{"other":1}'), 0)
+})
+
+test("a stalled body cannot block the request indefinitely", async () => {
+  let source
+  const stream = new ReadableStream({ start(controller) { source = controller } })
+  const request = new Request("https://example.test", { method: "POST", body: stream, duplex: "half" })
+  const start = Date.now()
+  assert.equal(await estimateRequestTokens(request, 0.3), 40_000)
+  assert.ok(Date.now() - start < MAX_BODY_READ_MS + 2_000)
+  source.enqueue(new TextEncoder().encode("still available"))
+  source.close()
+  assert.equal(await request.text(), "still available")
+})
+
+test("an aborted body read falls back promptly", async () => {
+  const controller = new AbortController()
+  const stream = new ReadableStream({ start() {} })
+  const request = new Request("https://example.test", {
+    method: "POST", body: stream, duplex: "half", signal: controller.signal,
+  })
+  const pending = estimateRequestTokens(request, 0.3)
+  controller.abort()
+  assert.equal(await pending, 40_000)
+})
+
+test("a stream of empty chunks has a bounded number of reads", async () => {
+  const stream = new ReadableStream({ pull(controller) { controller.enqueue(new Uint8Array()) } })
+  const request = new Request("https://example.test", { method: "POST", body: stream, duplex: "half" })
+  assert.equal(await estimateRequestTokens(request, 0.3), 40_000)
+  await request.body.cancel()
 })
 
 test("a small body is estimated from its text and output budget", async () => {

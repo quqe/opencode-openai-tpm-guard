@@ -30,16 +30,20 @@ log path, execute commands, or read credentials.
 ## What the plugin does with data
 
 - Never reads `Authorization` and never sends data anywhere.
-- Reads a bounded prefix of request bodies (4 MB without `Content-Length`) only to estimate size. Prompts and bodies
-  are not logged or persisted.
+- Reads a bounded prefix of request bodies (at most 4 MB and one second) only to estimate size. Prompts, bodies and
+  exception text are not logged or persisted.
 - Writes debug records only to a fixed private state directory (`$XDG_STATE_HOME/opencode/openai-tpm-guard`) with a
-  regular-file, owner, mode, symlink, and size check. Fields are stripped of control characters and truncated.
+  private-directory, regular-file, owner, mode, symlink, hard-link, and size check. Fields are stripped of control
+  characters and truncated. This is not a boundary against processes running as the same user.
 - Catches every hook error, so a defect in the guard cannot fail a model call.
 
 ## Supply chain
 
 - Runtime dependencies: none. `@opencode/plugin` is a peer provided by OpenCode; dev dependencies are for the build
   only.
-- CI runs the tests and fails if the committed `dist/` differs from `src/`.
+- The root npm overrides for `glob` and `minimatch` address advisories in the local development dependency tree.
+  They cross upstream major-version constraints and are covered by compatibility smoke tests. npm does not apply a
+  dependency package's overrides to its consumer, so these overrides do not patch the OpenCode host's own dependencies.
+- CI audits dependencies, runs the tests and fails if the committed `dist/` differs from `src/`.
 - Install from a pinned tag in production. Enable 2FA and branch protection on the repository; anyone with push access
   can change code that runs with the OpenCode server's privileges.

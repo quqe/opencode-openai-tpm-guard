@@ -4,6 +4,8 @@ export declare const ESTIMATE_FALLBACK_TOKENS = 40000;
 export declare const LARGE_BODY_BYTES: number;
 /** Without Content-Length, never buffer more than this many bytes of a body. */
 export declare const MAX_BODY_READ_BYTES: number;
+/** A slow or stalled stream must not indefinitely hold up the real request. */
+export declare const MAX_BODY_READ_MS = 1000;
 /** Output headroom used when a large body cannot be inspected for max output tokens. */
 export declare const LARGE_BODY_OUTPUT_TOKENS = 64000;
 /** No model reserves more than this for one reply; a larger value is a malformed body. */

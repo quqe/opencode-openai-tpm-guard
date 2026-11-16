@@ -12,6 +12,9 @@ test("parseInteger", () => {
   assert.equal(parseInteger("1000000"), 1_000_000)
   assert.equal(parseInteger(null), undefined)
   assert.equal(parseInteger("abc"), undefined)
+  assert.equal(parseInteger("123junk"), undefined)
+  assert.equal(parseInteger("9".repeat(200)), undefined)
+  assert.equal(parseInteger({}), undefined)
 })
 
 test("parseDurationMs understands OpenAI duration headers", () => {
@@ -23,6 +26,10 @@ test("parseDurationMs understands OpenAI duration headers", () => {
   assert.equal(parseDurationMs("8s522ms"), 8_522)
   assert.equal(parseDurationMs("garbage"), undefined)
   assert.equal(parseDurationMs(null), undefined)
+  assert.equal(parseDurationMs("-10s"), undefined)
+  assert.equal(parseDurationMs("1s garbage"), undefined)
+  assert.equal(parseDurationMs("9".repeat(200) + "s"), undefined)
+  assert.equal(parseDurationMs({}), undefined)
 })
 
 test("parseRetryAfter handles seconds and HTTP dates", () => {
@@ -74,4 +81,8 @@ test("readWindowFromErrorBody reads the repeated 429 headers", () => {
 
 test("readWindowFromErrorBody ignores oversized bodies", () => {
   assert.deepEqual(readWindowFromErrorBody("x".repeat(1_000_001)), {})
+  assert.deepEqual(readWindowFromErrorBody('{"error":{"headers":{"x-ratelimit-reset-tokens":{}}}}'), {
+    resetMs: undefined,
+    retryAfterMs: undefined,
+  })
 })

@@ -1,4 +1,4 @@
-import { closeSync, constants, fchmodSync, fstatSync, ftruncateSync, mkdirSync, openSync, realpathSync, writeSync, } from "node:fs";
+import { closeSync, constants, fchmodSync, fstatSync, ftruncateSync, lstatSync, mkdirSync, openSync, realpathSync, writeSync, } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 const NOOP = () => { };
@@ -16,6 +16,11 @@ function stateDirectory() {
         : join(homedir(), ".local", "state", "opencode");
     const dir = join(base, "openai-tpm-guard");
     mkdirSync(dir, { recursive: true, mode: 0o700 });
+    const stat = lstatSync(dir);
+    const uid = typeof process.getuid === "function" ? process.getuid() : undefined;
+    if (!stat.isDirectory() || (uid !== undefined && stat.uid !== uid) || (stat.mode & 0o077) !== 0) {
+        throw new Error("unsafe log directory");
+    }
     return realpathSync(dir);
 }
 export function defaultLogFile() {
@@ -42,13 +47,13 @@ export function createLogger(options) {
         return NOOP;
     }
     return (...args) => {
-        const line = `[${new Date().toISOString()}] ${args.map(render).join(" ")}\n`;
         try {
+            const line = `[${new Date().toISOString()}] ${args.map(render).join(" ")}\n`;
             const fd = openSync(file, OPEN_FLAGS, 0o600);
             try {
                 const stat = fstatSync(fd);
                 const uid = typeof process.getuid === "function" ? process.getuid() : undefined;
-                if (!stat.isFile() || (uid !== undefined && stat.uid !== uid))
+                if (!stat.isFile() || stat.nlink !== 1 || (uid !== undefined && stat.uid !== uid))
                     return;
                 fchmodSync(fd, 0o600);
                 if (stat.size > MAX_LOG_BYTES)
