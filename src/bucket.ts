@@ -65,9 +65,10 @@ export function release(bucket: Bucket, key: object): boolean {
   return true
 }
 
-function claim(bucket: Bucket, key: object, tokens: number, now: number, signal?: AbortSignal): void {
-  if (signal?.aborted) return
-  if (bucket.reservations.has(key)) return
+function claim(bucket: Bucket, key: object, tokens: number, now: number, signal?: AbortSignal): boolean {
+  if (signal?.aborted) return false
+  // Another instance or a duplicate event may have claimed this request already.
+  if (bucket.reservations.has(key)) return true
   if (!Number.isFinite(bucket.reserved)) bucket.reserved = 0
   const reservation: Reservation = { tokens, at: now, signal }
   if (signal) {
@@ -76,6 +77,7 @@ function claim(bucket: Bucket, key: object, tokens: number, now: number, signal?
   }
   bucket.reservations.set(key, reservation)
   bucket.reserved += tokens
+  return true
 }
 
 function prune(bucket: Bucket, now: number, ttl: number): void {
@@ -119,6 +121,20 @@ export function observe(
 }
 
 /**
+ * A small mutex around one bucket. Only the check-and-claim step runs under it;
+ * sleeping happens outside, so a small request can claim a free slot while a large
+ * one is paused instead of queueing behind it.
+ */
+function withLock<T>(bucket: Bucket, action: () => T | Promise<T>): Promise<T> {
+  const previous = bucket.gate
+  let release!: () => void
+  bucket.gate = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  return previous.then(action).finally(release)
+}
+
+/**
  * Claim `tokens` from the window, waiting until the reset brings enough room back.
  * A pause is bounded by `maxWaitMs`; after that the request is sent anyway and the
  * ordinary 429 retry path takes over. A request larger than the whole window can
@@ -136,66 +152,74 @@ export function reserve(
   if (bucket.reservations.has(key)) return Promise.resolve()
 
   const amount = normalizeTokens(tokens)
-  // The deadline starts when the request asks for a slot, not after it reaches the front
-  // of the queue; otherwise a burst of N requests multiplies maxWaitMs by N.
+  // The deadline starts when the request asks for a slot; otherwise a burst of N
+  // requests would multiply maxWaitMs by N.
   const deadline = timing.now() + settings.maxWaitMs
 
-  const run = bucket.gate.then(async () => {
+  const run = (async () => {
     while (true) {
       if (signal?.aborted) throw signal.reason ?? new Error("aborted")
-      prune(bucket, timing.now(), settings.reservationTtlMs)
-      repair(bucket)
 
-      const now = timing.now()
-      if (bucket.resetAt > 0 && now >= bucket.resetAt) {
-        bucket.remaining = bucket.limit > 0 ? bucket.limit : Number.POSITIVE_INFINITY
-        bucket.resetAt = 0
-      }
+      const outcome = await withLock(bucket, () => {
+        if (signal?.aborted) return { type: "abort" as const }
+        prune(bucket, timing.now(), settings.reservationTtlMs)
+        repair(bucket)
 
-      const available = bucket.remaining - bucket.reserved
-      const impossible = bucket.limit > 0 && amount + settings.safetyMarginTokens > bucket.limit
-      const fits =
-        bucket.remaining === Number.POSITIVE_INFINITY ||
-        available >= amount + settings.safetyMarginTokens
-
-      if (fits || impossible) {
-        if (signal?.aborted) throw signal.reason ?? new Error("aborted")
-        if (impossible) {
-          log("request exceeds the window, sending anyway", {
-            need: amount,
-            limit: bucket.limit,
-          })
+        const now = timing.now()
+        if (bucket.resetAt > 0 && now >= bucket.resetAt) {
+          bucket.remaining = bucket.limit > 0 ? bucket.limit : Number.POSITIVE_INFINITY
+          bucket.resetAt = 0
         }
-        claim(bucket, key, amount, now, signal)
-        if (!impossible) {
-          log("pass", {
-            need: amount,
-            available: Number.isFinite(available) ? available : "unbounded",
-            reserved: bucket.reserved,
-            limit: bucket.limit,
-          })
+
+        const available = bucket.remaining - bucket.reserved
+        const impossible = bucket.limit > 0 && amount + settings.safetyMarginTokens > bucket.limit
+        const fits =
+          bucket.remaining === Number.POSITIVE_INFINITY ||
+          available >= amount + settings.safetyMarginTokens
+
+        if (fits || impossible) {
+          if (signal?.aborted) return { type: "abort" as const }
+          if (impossible) {
+            log("request exceeds the window, sending anyway", {
+              need: amount,
+              limit: bucket.limit,
+            })
+          }
+          const claimed = claim(bucket, key, amount, now, signal)
+          if (!impossible && claimed) {
+            log("pass", {
+              need: amount,
+              available: Number.isFinite(available) ? available : "unbounded",
+              reserved: bucket.reserved,
+              limit: bucket.limit,
+            })
+          }
+          return { type: "claimed" as const }
         }
-        return
-      }
 
-      if (now >= deadline) {
-        log("pause limit reached, sending anyway", { available, need: amount })
-        claim(bucket, key, amount, now, signal)
-        return
-      }
+        if (now >= deadline) {
+          log("pause limit reached, sending anyway", { available, need: amount })
+          claim(bucket, key, amount, now, signal)
+          return { type: "claimed" as const }
+        }
 
-      const untilReset = bucket.resetAt > now ? bucket.resetAt - now + 250 : 5_000
-      const wait = Math.max(250, Math.min(untilReset, deadline - now, 15_000))
-      log("pausing", {
-        waitMs: Math.round(wait),
-        available,
-        reserved: bucket.reserved,
-        need: amount,
-        limit: bucket.limit,
+        const untilReset = bucket.resetAt > now ? bucket.resetAt - now + 250 : 5_000
+        const wait = Math.max(250, Math.min(untilReset, deadline - now, 15_000))
+        log("pausing", {
+          waitMs: Math.round(wait),
+          available,
+          reserved: bucket.reserved,
+          need: amount,
+          limit: bucket.limit,
+        })
+        return { type: "wait" as const, wait }
       })
-      await timing.sleep(wait, signal)
+
+      if (outcome.type === "claimed") return
+      if (outcome.type === "abort") throw signal?.reason ?? new Error("aborted")
+      await timing.sleep(outcome.wait, signal)
     }
-  })
-  bucket.gate = run.catch(() => {})
+  })()
+
   return run
 }

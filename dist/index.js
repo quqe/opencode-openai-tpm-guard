@@ -9,7 +9,7 @@ export { createBucket, observe, release, reserve } from "./bucket.js";
 export { estimateRequestTokens } from "./estimate.js";
 export { parseDurationMs, parseInteger, parseRetryAfter, readWindow, readWindowFromErrorBody, } from "./headers.js";
 export { DEFAULT_OPTIONS, readOptions } from "./options.js";
-const SHARED_KEY = Symbol.for("opencode.openai-tpm-guard.shared.v2");
+const SHARED_KEY = Symbol.for("opencode.openai-tpm-guard.shared.v3");
 /**
  * OpenCode can load one plugin file once per location in the same server process.
  * Shared state makes the extra instances harmless: the first one to see an event
@@ -48,7 +48,9 @@ export default Plugin.define({
         if (!options.enabled)
             return;
         const log = createLogger(options);
-        const timing = { now: () => Date.now(), sleep };
+        // Monotonic time: a wall-clock jump must not stretch or skip a TPM window.
+        const monotonicNow = () => (typeof performance !== "undefined" ? performance.now() : Date.now());
+        const timing = { now: monotonicNow, sleep };
         const bucketFor = (modelID) => {
             const key = `${options.providerID}:${modelID}`;
             const bucket = shared.buckets.get(key);

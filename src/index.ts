@@ -25,7 +25,7 @@ interface Shared {
   retries: WeakSet<object>
 }
 
-const SHARED_KEY = Symbol.for("opencode.openai-tpm-guard.shared.v2")
+const SHARED_KEY = Symbol.for("opencode.openai-tpm-guard.shared.v3")
 
 /**
  * OpenCode can load one plugin file once per location in the same server process.
@@ -67,7 +67,9 @@ export default Plugin.define({
     if (!options.enabled) return
 
     const log = createLogger(options)
-    const timing: Timing = { now: () => Date.now(), sleep }
+    // Monotonic time: a wall-clock jump must not stretch or skip a TPM window.
+    const monotonicNow = () => (typeof performance !== "undefined" ? performance.now() : Date.now())
+    const timing: Timing = { now: monotonicNow, sleep }
     const bucketFor = (modelID: string) => {
       const key = `${options.providerID}:${modelID}`
       const bucket = shared.buckets.get(key)

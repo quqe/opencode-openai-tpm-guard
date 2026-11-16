@@ -4,6 +4,7 @@ import {
   estimateRequestTokens,
   LARGE_BODY_BYTES,
   LARGE_BODY_OUTPUT_TOKENS,
+  MAX_BODY_READ_BYTES,
   MAX_OUTPUT_TOKENS,
   outputTokens,
 } from "../dist/estimate.js"
@@ -50,4 +51,19 @@ test("an unreadable body falls back to a conservative estimate", async () => {
     },
   }
   assert.equal(await estimateRequestTokens(request, 0.3), 40_000)
+})
+
+test("a body without Content-Length is capped instead of buffered whole", async () => {
+  const body = "a".repeat(MAX_BODY_READ_BYTES + 1024 * 1024)
+  const request = new Request("https://example.test/v1/responses", { method: "POST", body })
+  request.headers.delete("content-length")
+
+  // Consume the other tee branch, as the real HTTP client does, so cancelling the
+  // clone cannot stall the estimate.
+  const pending = estimateRequestTokens(request, 0.3)
+  await request.arrayBuffer()
+  const tokens = await pending
+
+  assert.ok(tokens >= Math.ceil(MAX_BODY_READ_BYTES * 0.3))
+  assert.ok(tokens < Math.ceil(body.length * 0.3))
 })

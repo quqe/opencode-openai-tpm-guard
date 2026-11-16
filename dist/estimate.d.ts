@@ -2,6 +2,8 @@ export declare const DEFAULT_TOKENS_PER_CHAR = 0.3;
 export declare const ESTIMATE_FALLBACK_TOKENS = 40000;
 /** Above this declared size, estimate from Content-Length instead of buffering the body. */
 export declare const LARGE_BODY_BYTES: number;
+/** Without Content-Length, never buffer more than this many bytes of a body. */
+export declare const MAX_BODY_READ_BYTES: number;
 /** Output headroom used when a large body cannot be inspected for max output tokens. */
 export declare const LARGE_BODY_OUTPUT_TOKENS = 64000;
 /** No model reserves more than this for one reply; a larger value is a malformed body. */
@@ -12,8 +14,8 @@ export declare const MAX_OUTPUT_TOKENS = 2000000;
  * request still streams untouched. Nothing is logged or stored.
  *
  * Large bodies (base64 images, attachments) are measured from Content-Length instead
- * of being duplicated in memory; bytes overestimate characters for non-ASCII text,
- * which errs on the safe side.
+ * of being duplicated in memory. Without Content-Length the clone is read to a hard
+ * cap and then cancelled, so a chunked body cannot exhaust memory.
  */
 export declare function estimateRequestTokens(request: Request, tokensPerChar: number): Promise<number>;
 /** Clamp the declared output budget; a hostile or malformed number must not become Infinity. */
