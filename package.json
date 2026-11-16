@@ -1,0 +1,43 @@
+{
+  "name": "opencode-openai-tpm-guard",
+  "version": "0.1.0",
+  "description": "OpenCode 2 plugin: proactive TPM pacing and 429 window handling for the OpenAI provider",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "npm run build && node --test test/*.test.js",
+    "prepare": "npm run build"
+  },
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "openai",
+    "rate-limit",
+    "tpm",
+    "throttle"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
+  "peerDependencies": {
+    "@opencode/plugin": ">=2.3.0"
+  },
+  "devDependencies": {
+    "@opencode/plugin": "2.3.0",
+    "@types/node": "^22.10.0",
+    "typescript": "^5.7.0"
+  }
+}
